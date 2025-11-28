@@ -165,3 +165,5 @@ Thumbs.db
 
 # Ignore test outputs
 data/*.csv
+
+.vscode
