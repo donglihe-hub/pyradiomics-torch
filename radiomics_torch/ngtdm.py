@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from radiomics import base, cMatrices
+from radiomics_torch import base, cMatrices
 
 
 class RadiomicsNGTDM(base.RadiomicsFeaturesBase):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from radiomics import base, cMatrices, deprecated
+from radiomics_torch import base, cMatrices, deprecated
 
 # from cmatrices import
 

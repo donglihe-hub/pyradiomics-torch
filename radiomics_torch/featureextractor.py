@@ -39,7 +39,7 @@ class RadiomicsFeatureExtractor:
             if featureClassName == "shape2D":  # Do not enable shape2D by default
                 continue
             # only support firstorder for now
-            if featureClassName not in  ["firstorder", "glcm", "glrlm"]:
+            if featureClassName not in  ["firstorder", "shape"]:
                 continue
             self.enabledFeatures[featureClassName] = []
         print("Enabled features: %s", self.enabledFeatures)
@@ -109,7 +109,15 @@ class RadiomicsFeatureExtractor:
 
         featureVector = collections.OrderedDict()
 
-        boundingBox = torch.where(maskArray == label)
+        coords = torch.nonzero(maskArray == label, as_tuple=False)
+        z_min = int(coords[:, 0].min())
+        z_max = int(coords[:, 0].max())
+        y_min = int(coords[:, 1].min())
+        y_max = int(coords[:, 1].max())
+        x_min = int(coords[:, 2].min())
+        x_max = int(coords[:, 2].max())
+
+        boundingBox = (z_min, z_max, y_min, y_max, x_min, x_max)
 
         logger.debug("Image and Mask loaded and valid, starting extraction")
 

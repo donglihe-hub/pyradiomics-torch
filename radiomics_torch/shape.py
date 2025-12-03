@@ -5,7 +5,7 @@ import SimpleITK as sitk
 import torch.nn.functional as F
 
 from . import base, deprecated
-from cshapes import calculate_coefficients_torch
+from .cshapes import calculate_coefficients_torch
 
 
 class RadiomicsShape(base.RadiomicsFeaturesBase):
@@ -17,18 +17,17 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
         raise NotImplementedError(msg)
 
     def _initSegmentBasedCalculation(self):
-
-        self.pixelSpacing = self.spacing[::-1]
+        self.pixelSpacing = torch.flip(self.spacing, dims=[0])
 
         # Pad inputMask to prevent index-out-of-range errors
         self.logger.debug("Padding the mask with 0s")
 
         pad = (1, 1, 1, 1, 1, 1)
-        self.inputMask = F.pad(self.inputMask, pad, mode="constant", value=0)
+        self.maskArray = F.pad(self.maskArray, pad, mode="constant", value=0)
 
         # Reassign self.maskArray using the now-padded self.inputMask
         self.maskArray = self.maskArray == self.label
-        self.labelledVoxelCoordinates = torch.where(self.maskArray != 0)
+        self.labelledVoxelCoordinates = torch.nonzero(self.maskArray != 0)
 
         self.logger.debug("Pre-calculate Volume, Surface Area and Eigenvalues")
 
@@ -39,15 +38,13 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
         )
 
         # Compute eigenvalues and -vectors
-        Np = len(self.labelledVoxelCoordinates[0])
-        coordinates = self.labelledVoxelCoordinates.transpose(
-            (1, 0)
-        )  # Transpose equals zip(*a)
+        coordinates = self.labelledVoxelCoordinates  # Transpose equals zip(*a)
+        Np = torch.tensor(coordinates.shape[0], device=self.device)
         physicalCoordinates = coordinates * self.pixelSpacing[None, :]
         physicalCoordinates -= torch.mean(physicalCoordinates, dim=0)  # Centered at 0
         physicalCoordinates /= torch.sqrt(Np)
-        covariance = torch.dot(physicalCoordinates.T.clone(), physicalCoordinates)
-        self.eigenValues = torch.linalg.eigvals(covariance)
+        covariance = torch.matmul(physicalCoordinates.T.clone(), physicalCoordinates)
+        self.eigenValues = torch.linalg.eigvalsh(covariance)
 
         # Correct machine precision errors causing very small negative eigen values in case of some 2D segmentations
         machine_errors = torch.bitwise_and(self.eigenValues < 0, self.eigenValues > -1e-10)

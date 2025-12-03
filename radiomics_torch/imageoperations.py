@@ -3,9 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Sequence, Tuple
 
-import numpy as np
 import torch
-import SimpleITK as sitk
 from torch import Tensor
 
 logger = logging.getLogger(__name__)
@@ -51,12 +49,13 @@ def getBinEdges(parameterValues, **kwargs):
 def binImage(parameterMatrix, parameterMatrixCoordinates=None, **kwargs):
     logger.debug("Discretizing gray levels inside ROI")
 
-    discretizedParameterMatrix = torch.zeros(parameterMatrix.shape, device=parameterMatrix.device, dtype=torch.int32)
+    discretizedParameterMatrix = torch.zeros(parameterMatrix.shape, device=parameterMatrix.device, dtype=torch.int64)
     if parameterMatrixCoordinates is None:
         binEdges = getBinEdges(parameterMatrix.flatten(), **kwargs)
         discretizedParameterMatrix = torch.bucketize(parameterMatrix, binEdges, right=True)  # np.digitize(..right=False) is equivalent to torch.bucketize(..., right=True)
     else:
         binEdges = getBinEdges(parameterMatrix[parameterMatrixCoordinates], **kwargs)
+        print()
         discretizedParameterMatrix[parameterMatrixCoordinates] = torch.bucketize(
             parameterMatrix[parameterMatrixCoordinates], binEdges, right=True
         )
@@ -73,9 +72,8 @@ def cropToTumorMask(
     if imageNode.shape != maskNode.shape:
         raise ValueError(f"imageNode and maskNode must have same shape, got "
                          f"{imageNode.shape} vs {maskNode.shape}")
-
     Z, Y, X = imageNode.shape
-
+    print(f"boundingBox shape: {boundingBox}")
     z_min, z_max, y_min, y_max, x_min, x_max = boundingBox
 
     z_min -= padDistance

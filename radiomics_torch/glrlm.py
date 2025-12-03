@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from radiomics import base, cMatrices
-from utils import torch_delete
+from radiomics_torch import base, cMatrices
+from .utils import torch_delete
 
 
 class RadiomicsGLRLM(base.RadiomicsFeaturesBase):

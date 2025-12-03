@@ -4,6 +4,7 @@ import torch  # type: ignore[import]
 
 from . import base, deprecated
 from .cmatrices import generate_angles_torch
+from .utils import nanstd, nanmin, nanmax, nanquantile
 
 
 class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
@@ -126,16 +127,16 @@ class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
         return -1.0 * torch.sum(p_i * torch.log2(p_i + eps), 1)
 
     def getMinimumFeatureValue(self):
-        return torch.nanmin(self.targetVoxelArray, 1).values
+        return nanmin(self.targetVoxelArray, 1).values
 
     def get10PercentileFeatureValue(self):
-        return torch.nanquantile(self.targetVoxelArray, 0.1, axis=1)
+        return nanquantile(self.targetVoxelArray, 0.1, dim=1)
 
     def get90PercentileFeatureValue(self):
-        return torch.nanquantile(self.targetVoxelArray, 0.9, axis=1)
+        return nanquantile(self.targetVoxelArray, 0.9, dim=1)
 
     def getMaximumFeatureValue(self):
-        return torch.nanmax(self.targetVoxelArray, 1).values
+        return nanmax(self.targetVoxelArray, 1).values
 
     def getMeanFeatureValue(self):
         return torch.nanmean(self.targetVoxelArray, 1)
@@ -144,19 +145,19 @@ class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
         return torch.nanmedian(self.targetVoxelArray, 1).values
 
     def getInterquartileRangeFeatureValue(self):
-        return torch.nanquantile(self.targetVoxelArray, 0.75, 1) - torch.nanquantile(
-            self.targetVoxelArray, 25, 1
+        return nanquantile(self.targetVoxelArray, 0.75, dim=1) - nanquantile(
+            self.targetVoxelArray, 0.25, dim=1
         )
 
     def getRangeFeatureValue(self):
         return (
-            torch.nanmax(self.targetVoxelArray, 1).values
-            - torch.nanmin(self.targetVoxelArray, 1).values
+            nanmax(self.targetVoxelArray, dim=1).values
+            - nanmin(self.targetVoxelArray, dim=1).values
         )
 
     def getMeanAbsoluteDeviationFeatureValue(self):
-        u_x = torch.nanmean(self.targetVoxelArray, 1, keepdims=True)
-        return torch.nanmean(torch.abs(self.targetVoxelArray - u_x), 1)
+        u_x = torch.nanmean(self.targetVoxelArray, dim=1, keepdims=True)
+        return torch.nanmean(torch.abs(self.targetVoxelArray - u_x), dim=1)
 
     def getRobustMeanAbsoluteDeviationFeatureValue(self):
         prcnt10 = self.get10PercentileFeatureValue()
@@ -164,19 +165,21 @@ class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
         percentileArray = self.targetVoxelArray.clone()
 
         # First get a mask for all valid voxels
-        msk = ~torch.isnan(percentileArray)
+        valid = ~torch.isnan(percentileArray)
         # Then, update the mask to reflect all valid voxels that are outside the the closed 10-90th percentile range
-        msk[msk] = ((percentileArray - prcnt10[:, None])[msk] < 0) | (
-            (percentileArray - prcnt90[:, None])[msk] > 0
+        cond = ((percentileArray - prcnt10[:, None]) < 0) | (
+            (percentileArray - prcnt90[:, None]) > 0
         )
+        msk = valid & cond
+
         # Finally, exclude the invalid voxels by setting them to torch.nan.
         percentileArray[msk] = torch.nan
 
         return torch.nanmean(
             torch.abs(
-                percentileArray - torch.nanmean(percentileArray, 1, keepdims=True)
+                percentileArray - torch.nanmean(percentileArray, dim=1, keepdims=True)
             ),
-            1,
+            dim=1,
         )
 
     def getRootMeanSquaredFeatureValue(self):
@@ -185,12 +188,12 @@ class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
             return 0
 
         shiftedParameterArray = self.targetVoxelArray + self.voxelArrayShift
-        Nvox = torch.sum(~torch.isnan(self.targetVoxelArray), 1).to(torch.float)
-        return torch.sqrt(torch.nansum(shiftedParameterArray**2, 1) / Nvox)
+        Nvox = torch.sum(~torch.isnan(self.targetVoxelArray), dim=1).to(torch.float)
+        return torch.sqrt(torch.nansum(shiftedParameterArray**2, dim=1) / Nvox)
 
     @deprecated
     def getStandardDeviationFeatureValue(self):
-        return torch.nanstd(self.targetVoxelArray, 1)
+        return nanstd(self.targetVoxelArray, dim=1)
 
     def getSkewnessFeatureValue(self):
         m2 = self._moment(self.targetVoxelArray, 2)
@@ -211,7 +214,7 @@ class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
         return m4 / m2**2.0
 
     def getVarianceFeatureValue(self):
-        return torch.nanstd(self.targetVoxelArray, 1) ** 2
+        return nanstd(self.targetVoxelArray, 1) ** 2
 
     def getUniformityFeatureValue(self):
         p_i = self.coefficients["p_i"]
