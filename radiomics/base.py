@@ -9,7 +9,7 @@ import torch
 from numpy import ndarray
 from torch import Tensor
 
-from radiomics import imageoperations
+from . import imageoperations
 
 
 class RadiomicsFeaturesBase:
@@ -31,7 +31,7 @@ class RadiomicsFeaturesBase:
         self.voxelBased = kwargs.get("voxelBased", False)
 
         # hardcode spacing
-        self.spacing = torch.tensor([1.0, 1.0, 1.0], device=self.device)
+        self.spacing = torch.tensor([1.0, 1.0, 1.0], device=self.device)  # z, y, x 
 
         self.coefficients = {}
 

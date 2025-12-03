@@ -6,7 +6,7 @@ from itertools import chain
 
 import torch
 
-from radiomics import (
+from . import (
     getFeatureClasses,
     getImageTypes,
     imageoperations,

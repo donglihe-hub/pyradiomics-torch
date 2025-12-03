@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch  # type: ignore[import]
 
-from radiomics import base, deprecated
-from cmatrices import generate_angles_torch
+from . import base, deprecated
+from .cmatrices import generate_angles_torch
 
 
 class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):

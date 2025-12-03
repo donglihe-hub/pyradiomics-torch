@@ -4,15 +4,13 @@ import torch
 import SimpleITK as sitk
 import torch.nn.functional as F
 
-from radiomics import base, cShape, deprecated
+from . import base, deprecated
+from cshapes import calculate_coefficients_torch
 
 
 class RadiomicsShape(base.RadiomicsFeaturesBase):
-    def __init__(self, inputImage, inputMask, **kwargs):
-        assert (
-            inputMask.GetDimension() == 3
-        ), "Shape features are only available in 3D. If 2D, use shape2D instead"
-        super().__init__(inputImage, inputMask, **kwargs)
+    def __init__(self, imageArray, maskArray, **kwargs):
+        super().__init__(imageArray, maskArray, **kwargs)
 
     def _initVoxelBasedCalculation(self):
         msg = "Shape features are not available in voxel-based mode"
@@ -25,8 +23,6 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
         # Pad inputMask to prevent index-out-of-range errors
         self.logger.debug("Padding the mask with 0s")
 
-        cpif = sitk.ConstantPadImageFilter()
-
         pad = (1, 1, 1, 1, 1, 1)
         self.inputMask = F.pad(self.inputMask, pad, mode="constant", value=0)
 
@@ -37,9 +33,8 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
         self.logger.debug("Pre-calculate Volume, Surface Area and Eigenvalues")
 
         # Volume, Surface Area and eigenvalues are pre-calculated
-
         # Compute Surface Area and volume
-        self.SurfaceArea, self.Volume, self.diameters = cShape.calculate_coefficients(
+        self.SurfaceArea, self.Volume, self.diameters = calculate_coefficients_torch(
             self.maskArray, self.pixelSpacing
         )
 

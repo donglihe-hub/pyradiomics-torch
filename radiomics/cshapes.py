@@ -1,5 +1,4 @@
 import torch
-from math import sqrt
 
 
 # 和上面一样的常量，只是换成 torch.tensor
