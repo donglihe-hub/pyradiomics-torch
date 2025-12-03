@@ -30,6 +30,9 @@ class RadiomicsFeaturesBase:
         self.label = kwargs.get("label", 1)
         self.voxelBased = kwargs.get("voxelBased", False)
 
+        # hardcode spacing
+        self.spacing = torch.tensor([1.0, 1.0, 1.0], device=self.device)
+
         self.coefficients = {}
 
         # all features are disabled by default

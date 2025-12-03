@@ -6,64 +6,6 @@ from radiomics import base, cMatrices, deprecated
 
 
 class RadiomicsGLDM(base.RadiomicsFeaturesBase):
-    r"""
-  A Gray Level Dependence Matrix (GLDM) quantifies gray level dependencies in an image.
-  A gray level dependency is defined as a the number of connected voxels within distance :math:`\delta` that are
-  dependent on the center voxel.
-  A neighbouring voxel with gray level :math:`j` is considered dependent on center voxel with gray level :math:`i`
-  if :math:`|i-j|\le\alpha`. In a gray level dependence matrix :math:`\textbf{P}(i,j)` the :math:`(i,j)`\ :sup:`th`
-  element describes the number of times a voxel with gray level :math:`i` with :math:`j` dependent voxels
-  in its neighbourhood appears in image.
-
-  As a two dimensional example, consider the following 5x5 image, with 5 discrete gray levels:
-
-  .. math::
-    \textbf{I} = \begin{bmatrix}
-    5 & 2 & 5 & 4 & 4\\
-    3 & 3 & 3 & 1 & 3\\
-    2 & 1 & 1 & 1 & 3\\
-    4 & 2 & 2 & 2 & 3\\
-    3 & 5 & 3 & 3 & 2 \end{bmatrix}
-
-  For :math:`\alpha=0` and :math:`\delta = 1`, the GLDM then becomes:
-
-  .. math::
-    \textbf{P} = \begin{bmatrix}
-    0 & 1 & 2 & 1 \\
-    1 & 2 & 3 & 0 \\
-    1 & 4 & 4 & 0 \\
-    1 & 2 & 0 & 0 \\
-    3 & 0 & 0 & 0 \end{bmatrix}
-
-  Let:
-
-  - :math:`N_g` be the number of discrete intensity values in the image
-  - :math:`N_d` be the number of discrete dependency sizes in the image
-  - :math:`N_z` be the number of dependency zones in the image, which is equal to
-    :math:`\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\textbf{P}(i,j)}`
-  - :math:`\textbf{P}(i,j)` be the dependence matrix
-  - :math:`p(i,j)` be the normalized dependence matrix, defined as :math:`p(i,j) = \frac{\textbf{P}(i,j)}{N_z}`
-
-  .. note::
-    Because incomplete zones are allowed, every voxel in the ROI has a dependency zone. Therefore, :math:`N_z = N_p`,
-    where :math:`N_p` is the number of voxels in the image.
-    Due to the fact that :math:`Nz = N_p`, the Dependence Percentage and Gray Level Non-Uniformity Normalized (GLNN)
-    have been removed. The first because it would always compute to 1, the latter because it is mathematically equal to
-    first order - Uniformity (see :py:func:`~radiomics.firstorder.RadiomicsFirstOrder.getUniformityFeatureValue()`). For
-    mathematical proofs, see :ref:`here <radiomics-excluded-gldm-label>`.
-
-  The following class specific settings are possible:
-
-  - distances [[1]]: List of integers. This specifies the distances between the center voxel and the neighbor, for which
-    angles should be generated.
-  - gldm_a [0]: float, :math:`\alpha` cutoff value for dependence. A neighbouring voxel with gray level :math:`j` is
-    considered dependent on center voxel with gray level :math:`i` if :math:`|i-j|\le\alpha`
-
-  References:
-
-  - Sun C, Wee WG. Neighboring Gray Level Dependence Matrix for Texture Classification. Comput Vision,
-    Graph Image Process. 1983;23:341-352
-  """
 
     def __init__(self, inputImage, inputMask, **kwargs):
         super().__init__(inputImage, inputMask, **kwargs)

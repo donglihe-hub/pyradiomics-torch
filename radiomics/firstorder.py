@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import torch  # type: ignore[import]
 
-from radiomics import base, cMatrices, deprecated
-from cmatrix import generate_angles
+from radiomics import base, deprecated
+from cmatrices import generate_angles_torch
 
 
 class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
-    def __init__(self, inputImage, inputMask, **kwargs):
-        super().__init__(inputImage, inputMask, **kwargs)
+    def __init__(self, imageArray, maskArray, **kwargs):
+        super().__init__(imageArray, maskArray, **kwargs)
 
         self.pixelSpacing = torch.tensor(kwargs.get("spacing", [1, 1, 1]), device=self.device, dtype=self.dtype)
         self.voxelArrayShift = kwargs.get("voxelArrayShift", 0)
@@ -33,7 +33,7 @@ class RadiomicsFirstOrder(base.RadiomicsFeaturesBase):
         boundingBoxSize = torch.minimum(size, kernelRadius * 2 + 1)
 
         # Calculate the offsets, which can be used to generate a list of kernel Coordinates. Shape (Nd, Nk)
-        self.kernelOffsets = cMatrices.generate_angles(
+        self.kernelOffsets = generate_angles_torch(
             boundingBoxSize,
             torch.arange(1, kernelRadius + 1, device=self.device, dtype=torch.int64),
             True,  # Bi-directional
