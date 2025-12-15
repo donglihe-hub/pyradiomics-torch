@@ -38,9 +38,7 @@ class RadiomicsFeatureExtractor:
         for featureClassName in self.featureClassNames:
             if featureClassName == "shape2D":  # Do not enable shape2D by default
                 continue
-            # only support firstorder for now
-            if featureClassName not in  ["firstorder", "shape"]:
-                continue
+            # skip ngtdm features for now
             self.enabledFeatures[featureClassName] = []
         print("Enabled features: %s", self.enabledFeatures)
         logger.info("Enabled features: %s", self.enabledFeatures)

@@ -1,4 +1,4 @@
-# test_ngtdm.py
+# test_all.py
 from __future__ import annotations
 
 import numpy as np
@@ -14,17 +14,16 @@ from radiomics_torch import featureextractor as torch_featureextractor
 
 # =========================================================
 # 工具函数：numpy <-> SimpleITK
-# （和 test_glcm.py / test_gldm.py / test_glrlm.py / test_glszm.py 保持一致）
 # =========================================================
 
 def numpy_to_sitk(image_np: np.ndarray,
-                  spacing_zyx=None,
+                  spacing_zyx=(1.0, 1.0, 1.0),
                   origin=None,
                   direction=None) -> sitk.Image:
     """
     image_np: shape (Z, Y, X)
     spacing_zyx: (dz, dy, dx)
-    SITK spacing 顺序是 (sx, sy, sz) = (dx, dy, dz)
+    SimpleITK spacing 顺序是 (sx, sy, sz) = (dx, dy, dz)
     """
     img = sitk.GetImageFromArray(image_np.astype(np.float32))
 
@@ -41,7 +40,7 @@ def numpy_to_sitk(image_np: np.ndarray,
 
 
 def numpy_mask_to_sitk(mask_np: np.ndarray,
-                       spacing_zyx=None,
+                       spacing_zyx=(1.0, 1.0, 1.0),
                        origin=None,
                        direction=None) -> sitk.Image:
     mask = sitk.GetImageFromArray(mask_np.astype(np.uint8))
@@ -59,18 +58,17 @@ def numpy_mask_to_sitk(mask_np: np.ndarray,
 
 
 # =========================================================
-# radiomics_torch 版 NGTDM
+# radiomics_torch：开启所有特征（不含 shape2D）
 # =========================================================
 
-def ngtdm_radiomics_torch(image_t: torch.Tensor,
-                          mask_t: torch.Tensor,
-                          spacing_zyx=(1.0, 1.0, 1.0),
-                          settings=None,
-                          label: int = 1) -> dict:
+def radiomics_torch_all(image_t: torch.Tensor,
+                        mask_t: torch.Tensor,
+                        spacing_zyx=(1.0, 1.0, 1.0),
+                        settings=None,
+                        label: int = 1) -> dict:
     """
-    用 radiomics_torch 跑 NGTDM 特征。
-    image_t: torch.Tensor, shape (Z, Y, X)
-    mask_t: torch.Tensor, same shape, >0 表示 ROI
+    用 radiomics_torch 跑所有 feature class
+    （firstorder / shape / glcm / glrlm / glszm / gldm / ngtdm），不启用 shape2D。
     """
     image_t = image_t.to(torch.float32)
 
@@ -79,7 +77,6 @@ def ngtdm_radiomics_torch(image_t: torch.Tensor,
     mask_label_t[mask_t > 0] = label
 
     if settings is None:
-        # 尽量和官方 pyradiomics 设置保持一致
         settings = {
             "resampledPixelSpacing": None,  # 不重采样
             "normalize": False,
@@ -91,34 +88,42 @@ def ngtdm_radiomics_torch(image_t: torch.Tensor,
         }
 
     extractor = torch_featureextractor.RadiomicsFeatureExtractor(**settings)
+
+    # 不直接 enableAllFeatures，避免 shape2D
+    extractor.disableAllFeatures()
+    for cls in ["firstorder", "shape", "glcm", "gldm", "glrlm", "glszm", "ngtdm"]:
+        extractor.enableFeatureClassByName(cls)
+
     extractor.disableAllImageTypes()
     extractor.enableImageTypeByName("Original")
-    extractor.disableAllFeatures()
-    extractor.enableFeatureClassByName("ngtdm")
 
-    print("radiomics_torch enabled ngtdm features:", extractor.enabledFeatures)
+    print("\n[radiomics_torch] Enabled features:", extractor.enabledFeatures)
 
-    # radiomics_torch: 直接 tensor
     result = extractor.execute(image_t, mask_label_t)
 
-    # 只保留 NGTDM 相关特征
-    return {
-        k: float(v) for k, v in result.items()
-        if "ngtdm" in k
-    }
+    # 关键修正点：任何能 float(v) 的都收下，支持 torch.Tensor / numpy / python 标量
+    out: dict[str, float] = {}
+    for k, v in result.items():
+        try:
+            out[k] = float(v)
+        except Exception:
+            # 例如有些 value 是 list/dict/对象，直接跳过
+            continue
+
+    return out
 
 
 # =========================================================
-# 官方 pyradiomics 版 NGTDM
+# 官方 pyradiomics：开启所有特征（同样不含 shape2D）
 # =========================================================
 
-def ngtdm_pyradiomics_sitk(image_t: torch.Tensor,
-                           mask_t: torch.Tensor,
-                           spacing_zyx=(1.0, 1.0, 1.0),
-                           settings=None,
-                           label: int = 1) -> dict:
+def radiomics_pyradiomics_all(image_t: torch.Tensor,
+                              mask_t: torch.Tensor,
+                              spacing_zyx=(1.0, 1.0, 1.0),
+                              settings=None,
+                              label: int = 1) -> dict:
     """
-    用官方 pyradiomics + SimpleITK 跑 NGTDM。
+    用官方 pyradiomics + SimpleITK 跑所有 feature class（不启用 shape2D）。
     """
     image_np = image_t.detach().cpu().numpy().astype(np.float32)
     mask_np = (mask_t.detach().cpu().numpy() > 0).astype(np.uint8) * label
@@ -139,52 +144,59 @@ def ngtdm_pyradiomics_sitk(image_t: torch.Tensor,
         }
 
     extractor = pyrad_featureextractor.RadiomicsFeatureExtractor(**settings)
+
+    extractor.disableAllFeatures()
+    for cls in ["firstorder", "shape", "glcm", "gldm", "glrlm", "glszm", "ngtdm"]:
+        extractor.enableFeatureClassByName(cls)
+
     extractor.disableAllImageTypes()
     extractor.enableImageTypeByName("Original")
-    extractor.disableAllFeatures()
-    extractor.enableFeatureClassByName("ngtdm")
 
-    print("pyradiomics (official) enabled ngtdm features:", extractor.enabledFeatures)
+    print("\n[pyradiomics_official] Enabled features:", extractor.enabledFeatures)
 
     result = extractor.execute(image_sitk, mask_sitk)
 
-    return {
-        k: float(v) for k, v in result.items()
-        if "ngtdm" in k
-    }
+    out: dict[str, float] = {}
+    for k, v in result.items():
+        try:
+            out[k] = float(v)
+        except Exception:
+            continue
+
+    return out
 
 
 # =========================================================
-# NGTDM 对比
+# 对比所有特征
 # =========================================================
 
-def compare_ngtdm_all(image_t: torch.Tensor,
-                      mask_t: torch.Tensor,
-                      spacing_zyx=(1.0, 1.0, 1.0),
-                      pyrad_torch_settings=None,
-                      pyrad_sitk_settings=None,
-                      print_table: bool = True):
+def compare_all_features(image_t: torch.Tensor,
+                         mask_t: torch.Tensor,
+                         spacing_zyx=(1.0, 1.0, 1.0),
+                         pyrad_torch_settings=None,
+                         pyrad_sitk_settings=None,
+                         print_table: bool = True):
     """
     对比：
-      - radiomics_torch NGTDM
-      - 官方 pyradiomics NGTDM
+      - radiomics_torch (all feature classes except shape2D)
+      - 官方 pyradiomics (同样的 feature classes)
     """
-    ngtdm_rtorch = ngtdm_radiomics_torch(
+    res_torch = radiomics_torch_all(
         image_t, mask_t, spacing_zyx=spacing_zyx, settings=pyrad_torch_settings
     )
-    ngtdm_pyrad = ngtdm_pyradiomics_sitk(
+    res_pyrad = radiomics_pyradiomics_all(
         image_t, mask_t, spacing_zyx=spacing_zyx, settings=pyrad_sitk_settings
     )
 
     if print_table:
-        all_keys = sorted(set(ngtdm_rtorch.keys()) | set(ngtdm_pyrad.keys()))
+        all_keys = sorted(set(res_torch.keys()) | set(res_pyrad.keys()))
 
-        print("\n===== NGTDM comparison =====")
+        print("\n=================== All Features Comparison (no shape2D) ===================")
         print("{:<60s} {:>15s} {:>15s} {:>15s}".format(
             "Feature",
-            "RadTorch",
-            "RadOfficial",
-            "RT - RO",
+            "Torch",
+            "Official",
+            "Torch - Off",
         ))
         print("-" * 115)
 
@@ -192,18 +204,18 @@ def compare_ngtdm_all(image_t: torch.Tensor,
             return "None" if x is None else f"{x:.6g}"
 
         for k in all_keys:
-            vrt = ngtdm_rtorch.get(k, None)
-            vro = ngtdm_pyrad.get(k, None)
-            diff_rt_ro = None if vrt is None or vro is None else vrt - vro
+            vt = res_torch.get(k, None)
+            vo = res_pyrad.get(k, None)
+            diff = None if vt is None or vo is None else vt - vo
 
             print("{:<60s} {:>15s} {:>15s} {:>15s}".format(
                 k,
-                fmt(vrt),
-                fmt(vro),
-                fmt(diff_rt_ro),
+                fmt(vt),
+                fmt(vo),
+                fmt(diff),
             ))
 
-    return ngtdm_rtorch, ngtdm_pyrad
+    return res_torch, res_pyrad
 
 
 # =========================================================
@@ -217,20 +229,19 @@ if __name__ == "__main__":
     msk = torch.zeros((Z, Y, X), dtype=torch.uint8)
 
     # ROI: 4:12 的立方体 => 8x8x8 = 512 个 voxel
-    # 这里简单用一个类似 NGTDM 文档里的离散灰度分布，
-    # 先随机整数，再乘常数让 binning 生效
-    roi = torch.randint(low=1, high=6, size=(8, 8, 8), dtype=torch.int32)
-    img[4:12, 4:12, 4:12] = roi.to(torch.float32)
+    # 随机离散灰度，让所有矩阵类特征有点结构
+    roi = torch.randint(low=1, high=20, size=(8, 8, 8), dtype=torch.int32).to(torch.float32)
+    img[4:12, 4:12, 4:12] = roi
     msk[4:12, 4:12, 4:12] = 1
 
     spacing = (1.0, 1.0, 1.0)
 
-    ngtdm_rtorch, ngtdm_pyrad = compare_ngtdm_all(
+    res_torch, res_pyrad = compare_all_features(
         img, msk, spacing_zyx=spacing,
         pyrad_torch_settings=None,
         pyrad_sitk_settings=None,
         print_table=True,
     )
 
-    print("\nNGTDM radiomics_torch keys:", ngtdm_rtorch.keys())
-    print("NGTDM pyradiomics (official) keys:", ngtdm_pyrad.keys())
+    print("\nTorch feature count:", len(res_torch))
+    print("Official feature count:", len(res_pyrad))
