@@ -180,7 +180,7 @@ class RadiomicsFeatureExtractor:
                 newFeatureName = f"original_{shape_type}_{featureName}"
                 featureVector[newFeatureName] = featureValue
 
-        Nd = maskArray.shape[0]
+        Nd = maskArray.dim()
         if "shape" in enabledFeatures:
             if Nd == 3:
                 compute("shape")

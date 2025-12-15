@@ -208,37 +208,35 @@ def calculate_coefficients_torch(mask: torch.Tensor,
     mask: (Z, Y, X) tensor，非零视为 segmentation
     spacing: (3,) tensor，对应 [dz, dy, dx]
 
-    返回: surface_area (float), volume (float), diameters (torch.Tensor of shape (4,))
+    返回: surface_area (0-d tensor), volume (0-d tensor), diameters (tensor of shape (4,))
+    都在 mask 的同一个 device 上（比如 cuda:0）
     """
-    if not torch.is_tensor(mask):
-        mask = torch.tensor(mask)
-    if not torch.is_tensor(spacing):
-        spacing = torch.tensor(spacing, dtype=torch.float64)
-
     assert mask.dim() == 3, "mask must be 3D"
     assert spacing.numel() == 3, "spacing must have length 3"
 
-    mask = mask.to(dtype=torch.bool)  # 用 bool 即可
-    spacing = spacing.to(dtype=torch.float64)
+    device = mask.device
+    mask = mask.to(dtype=torch.bool, device=device)
+    spacing = spacing.to(dtype=torch.float64, device=device)
 
     Z, Y, X = mask.shape
-    size = (Z, Y, X)
 
-    surface_area = 0.0
-    volume = 0.0
+    # ✅ tensor 累加，留在 GPU
+    surface_area = torch.zeros((), dtype=torch.float64, device=device)
+    volume = torch.zeros((), dtype=torch.float64, device=device)
 
     vertices = []
-    device = mask.device
 
+    # 这些 lookup 表全局是 CPU 的没关系，只要用于索引 / tolist，
+    # 真正计算都在 GPU 上
     for iz in range(Z - 1):
         for iy in range(Y - 1):
             for ix in range(X - 1):
                 cube_idx = 0
                 for a_idx in range(8):
-                    dz, dy, dx = GRID_ANGLES_T[a_idx].tolist()
-                    z = iz + dz
-                    y = iy + dy
-                    x = ix + dx
+                    dz, dy, dx = GRID_ANGLES_T[a_idx]
+                    z = iz + int(dz.item())
+                    y = iy + int(dy.item())
+                    x = ix + int(dx.item())
                     if mask[z, y, x]:
                         cube_idx |= (1 << a_idx)
 
@@ -248,16 +246,18 @@ def calculate_coefficients_torch(mask: torch.Tensor,
                 else:
                     sign_correction = 1.0
 
-                # 顶点记录
+                # ************************
+                # Store vertices for diameter calculation
+                # ************************
                 for t in range(3):
                     pt_idx = int(POINTS_EDGES_T[0, t])
                     vert_idx = int(POINTS_EDGES_T[1, t])
                     if cube_idx & (1 << pt_idx):
-                        vz, vy, vx = VERT_LIST_T[vert_idx].tolist()
+                        vz, vy, vx = VERT_LIST_T[vert_idx]
                         vertices.append([
-                            (iz + vz) * float(spacing[0]),
-                            (iy + vy) * float(spacing[1]),
-                            (ix + vx) * float(spacing[2]),
+                            (iz + float(vz)) * float(spacing[0]),
+                            (iy + float(vy)) * float(spacing[1]),
+                            (ix + float(vx)) * float(spacing[2]),
                         ])
 
                 if cube_idx == 0:
@@ -266,6 +266,7 @@ def calculate_coefficients_torch(mask: torch.Tensor,
                 tri_row = TRI_TABLE_T[cube_idx]
                 t_idx = 0
                 while tri_row[3 * t_idx] >= 0:
+                    # 这里 a/b/c 都在 GPU 上
                     a = torch.tensor([iz, iy, ix], dtype=torch.float64, device=device)
                     b = a.clone()
                     c = a.clone()
@@ -279,16 +280,21 @@ def calculate_coefficients_torch(mask: torch.Tensor,
                         b[d] *= spacing[d]
                         c[d] *= spacing[d]
 
-                    # 体积
+                    # ************************
+                    # Calculate volume (GPU)
+                    # ************************
                     ab = torch.tensor([
                         (a[1] * b[2]) - (b[1] * a[2]),
                         (a[2] * b[0]) - (b[2] * a[0]),
                         (a[0] * b[1]) - (b[0] * a[1]),
                     ], dtype=torch.float64, device=device)
 
-                    volume += sign_correction * float(torch.dot(ab, c))
+                    # sign_correction 是 Python float，但是会自动转为 tensor broadcast
+                    volume = volume + sign_correction * torch.dot(ab, c)
 
-                    # 表面积
+                    # ************************
+                    # Calculate surface area (GPU)
+                    # ************************
                     a_rel = a - c
                     b_rel = b - c
 
@@ -298,13 +304,14 @@ def calculate_coefficients_torch(mask: torch.Tensor,
                         (a_rel[0] * b_rel[1]) - (b_rel[0] * a_rel[1]),
                     ], dtype=torch.float64, device=device)
 
-                    surface_area += 0.5 * float(torch.linalg.norm(ab2))
+                    surface_area = surface_area + 0.5 * torch.linalg.norm(ab2)
 
                     t_idx += 1
 
-    volume /= 6.0
+    volume = volume / 6.0
 
     if len(vertices) > 0:
+        # 这里一次性把所有点搬到 GPU 上
         vertices_t = torch.tensor(vertices, dtype=torch.float64, device=device)
         diameters = calculate_mesh_diameter_torch(vertices_t)
     else:

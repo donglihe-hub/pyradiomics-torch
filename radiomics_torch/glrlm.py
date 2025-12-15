@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from radiomics_torch import base, cMatrices
+from radiomics_torch import base
+
+from .cmatrices import calculate_glrlm_torch
 from .utils import torch_delete
 
 
@@ -44,7 +46,7 @@ class RadiomicsGLRLM(base.RadiomicsFeaturesBase):
         if self.voxelBased:
             matrix_args += [self.settings.get("kernelRadius", 1), voxelCoordinates]
 
-        P_glrlm, angles = cMatrices.calculate_glrlm(
+        P_glrlm, angles = calculate_glrlm_torch(
             *matrix_args
         )  # shape (Nvox, Ng, Nr, Na)
 
@@ -99,7 +101,7 @@ class RadiomicsGLRLM(base.RadiomicsFeaturesBase):
             else:
                 self.logger.debug("No empty angles")
 
-        Nr[Nr == 0] = np.nan  # set sum to numpy.spacing(1) if sum is 0?
+        Nr[Nr == 0] = torch.nan  # set sum to numpy.spacing(1) if sum is 0?
         self.coefficients["Nr"] = Nr
 
         return P_glrlm
@@ -110,16 +112,16 @@ class RadiomicsGLRLM(base.RadiomicsFeaturesBase):
         pr = torch.sum(self.P_glrlm, dim=1)  # shape (Nvox, Nr, Na)
         pg = torch.sum(self.P_glrlm, dim=2)  # shape (Nvox, Ng, Na)
 
-        ivector = self.coefficients["grayLevels"].astype(float)  # shape (Ng,)
+        ivector = self.coefficients["grayLevels"].to(dtype=torch.float64)  # shape (Ng,)
         jvector = torch.arange(
             1, self.P_glrlm.shape[2] + 1, dtype=torch.float64
         )  # shape (Nr,)
 
         # Delete columns that run lengths not present in the ROI
-        emptyRunLenghts = np.where(np.sum(pr, (0, 2)) == 0)
-        self.P_glrlm = np.delete(self.P_glrlm, emptyRunLenghts, 2)
-        jvector = np.delete(jvector, emptyRunLenghts)
-        pr = np.delete(pr, emptyRunLenghts, 1)
+        emptyRunLenghts = torch.where(torch.sum(pr, dim=(0, 2)) == 0)[0]
+        self.P_glrlm = torch_delete(self.P_glrlm, emptyRunLenghts, 2)
+        jvector = torch_delete(jvector, emptyRunLenghts, 0)
+        pr = torch_delete(pr, emptyRunLenghts, 1)
 
         self.coefficients["pr"] = pr
         self.coefficients["pg"] = pg

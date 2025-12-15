@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import numpy as np
+import torch
 
-from radiomics_torch import base, cMatrices, deprecated
+from radiomics_torch import base, deprecated
+
+from .cmatrices import calculate_gldm_torch
+from .utils import delete_torch
 
 
 class RadiomicsGLDM(base.RadiomicsFeaturesBase):
@@ -24,14 +27,12 @@ class RadiomicsGLDM(base.RadiomicsFeaturesBase):
         )
 
     def _calculateMatrix(self, voxelCoordinates=None):
-        self.logger.debug("Calculating GLDM matrix in C")
-
         Ng = self.coefficients["Ng"]
 
         matrix_args = [
             self.imageArray,
             self.maskArray,
-            np.array(self.settings.get("distances", [1])),
+            torch.tensor(self.settings.get("distances", [1]), device=self.device),
             Ng,
             self.gldm_a,
             self.settings.get("force2D", False),
@@ -40,105 +41,78 @@ class RadiomicsGLDM(base.RadiomicsFeaturesBase):
         if self.voxelBased:
             matrix_args += [self.settings.get("kernelRadius", 1), voxelCoordinates]
 
-        P_gldm = cMatrices.calculate_gldm(*matrix_args)  # shape (Nv, Ng, Nd)
+        P_gldm = calculate_gldm_torch(*matrix_args)  # shape (Nv, Ng, Nd)
 
-        # Delete rows that specify gray levels not present in the ROI
-        NgVector = range(1, Ng + 1)  # All possible gray values
-        GrayLevels = self.coefficients["grayLevels"]  # Gray values present in ROI
-        emptyGrayLevels = np.array(
-            list(set(NgVector) - set(GrayLevels)), dtype=int
-        )  # Gray values NOT present in ROI
+        # ---- 关键：用 Python int 做集合运算，而不是直接对 torch.Tensor 调用 set() ----
+        NgVector = list(range(1, Ng + 1))  # All possible gray values
 
-        P_gldm = np.delete(P_gldm, emptyGrayLevels - 1, 1)
+        gray_levels_t = self.coefficients["grayLevels"]
+        # 确保拿到的是一串 Python int
+        if isinstance(gray_levels_t, torch.Tensor):
+            GrayLevels = gray_levels_t.to(torch.int64).tolist()
+        else:
+            # 兼容 numpy / list 的情况
+            GrayLevels = [int(g) for g in gray_levels_t]
 
-        jvector = np.arange(1, P_gldm.shape[2] + 1, dtype="float64")
+        emptyGrayLevels_list = sorted(set(NgVector) - set(GrayLevels))  # 真的“没出现过”的灰度
+        if len(emptyGrayLevels_list) > 0:
+            emptyGrayLevels = torch.tensor(
+                emptyGrayLevels_list, dtype=torch.int64, device=self.device
+            )
+            # 删除这些灰度对应的行（注意 -1 转成 0-based index）
+            P_gldm = delete_torch(P_gldm, emptyGrayLevels - 1, dim=1)
+
+        # 下面保持不变（只是顺手加点注释）
+        jvector = torch.arange(1, P_gldm.shape[2] + 1, dtype=torch.float64, device=self.device)
 
         # shape (Nv, Nd)
-        pd = np.sum(P_gldm, 1)
-        # shape (Nv, Ng)
-        pg = np.sum(P_gldm, 2)
+        pd = torch.sum(P_gldm, dim=1)
+        # shape (Nv, Ng')
+        pg = torch.sum(P_gldm, dim=2)
 
         # Delete columns that dependence sizes not present in the ROI
-        empty_sizes = np.sum(pd, 0)
-        P_gldm = np.delete(P_gldm, np.where(empty_sizes == 0), 2)
-        jvector = np.delete(jvector, np.where(empty_sizes == 0))
-        pd = np.delete(pd, np.where(empty_sizes == 0), 1)
+        empty_sizes = torch.sum(pd, dim=0)   # (Nd,)
+        indices = torch.where(empty_sizes == 0)[0]
 
-        Nz = np.sum(pd, 1)  # Nz per kernel, shape (Nv, )
-        Nz[Nz == 0] = 1  # set sum to numpy.spacing(1) if sum is 0?
+        if indices.numel() > 0:
+            P_gldm = delete_torch(P_gldm, indices, dim=2)
+            jvector = delete_torch(jvector, indices, dim=0)
+            pd = delete_torch(pd, indices, dim=1)
+
+        Nz = torch.sum(pd, dim=1)  # Nz per kernel, shape (Nv,)
+        Nz[Nz == 0] = 1
 
         self.coefficients["Nz"] = Nz
-
         self.coefficients["pd"] = pd
         self.coefficients["pg"] = pg
-
-        self.coefficients["ivector"] = self.coefficients["grayLevels"].astype(float)
+        self.coefficients["ivector"] = self.coefficients["grayLevels"].to(torch.float64)
         self.coefficients["jvector"] = jvector
 
         return P_gldm
 
+
     def getSmallDependenceEmphasisFeatureValue(self):
-        r"""
-        **1. Small Dependence Emphasis (SDE)**
-
-        .. math::
-          SDE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\frac{\textbf{P}(i,j)}{j^2}}}{N_z}
-
-        A measure of the distribution of small dependencies, with a greater value indicative
-        of smaller dependence and less homogeneous textures.
-        """
         pd = self.coefficients["pd"]
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]  # Nz = Np, see class docstring
 
-        return np.sum(pd / (jvector[None, :] ** 2), 1) / Nz
+        return torch.sum(pd / (jvector[None, :] ** 2), dim=1) / Nz
 
     def getLargeDependenceEmphasisFeatureValue(self):
-        r"""
-        **2. Large Dependence Emphasis (LDE)**
-
-        .. math::
-          LDE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\textbf{P}(i,j)j^2}}{N_z}
-
-        A measure of the distribution of large dependencies, with a greater value indicative
-        of larger dependence and more homogeneous textures.
-        """
         pd = self.coefficients["pd"]
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]
 
-        return np.sum(pd * (jvector[None, :] ** 2), 1) / Nz
+        return torch.sum(pd * (jvector[None, :] ** 2), dim=1) / Nz
 
     def getGrayLevelNonUniformityFeatureValue(self):
-        r"""
-        **3. Gray Level Non-Uniformity (GLN)**
-
-        .. math::
-          GLN = \frac{\sum^{N_g}_{i=1}\left(\sum^{N_d}_{j=1}{\textbf{P}(i,j)}\right)^2}{N_z}
-
-        Measures the similarity of gray-level intensity values in the image, where a lower GLN value
-        correlates with a greater similarity in intensity values.
-        """
         pg = self.coefficients["pg"]
         Nz = self.coefficients["Nz"]
 
-        return np.sum(pg**2, 1) / Nz
+        return torch.sum(pg**2, dim=1) / Nz
 
     @deprecated
     def getGrayLevelNonUniformityNormalizedFeatureValue(self):
-        r"""
-        **DEPRECATED. Gray Level Non-Uniformity Normalized (GLNN)**
-
-        :math:`GLNN = \frac{\sum^{N_g}_{i=1}\left(\sum^{N_d}_{j=1}{\textbf{P}(i,j)}\right)^2}{\sum^{N_g}_{i=1}
-        \sum^{N_d}_{j=1}{\textbf{P}(i,j)}^2}`
-
-        .. warning::
-          This feature has been deprecated, as it is mathematically equal to First Order - Uniformity
-          :py:func:`~radiomics.firstorder.RadiomicsFirstOrder.getUniformityFeatureValue()`.
-          See :ref:`here <radiomics-excluded-gldm-glnn-label>` for the proof. **Enabling this feature will result in the
-          logging of a DeprecationWarning (does not interrupt extraction of other features), no value is calculated for
-          this feature**
-        """
         msg = (
             "GLDM - Gray Level Non-Uniformity Normalized is mathematically equal to First Order - "
             "Uniformity, see http://pyradiomics.readthedocs.io/en/latest/removedfeatures.html for more"
@@ -147,102 +121,48 @@ class RadiomicsGLDM(base.RadiomicsFeaturesBase):
         raise DeprecationWarning(msg)
 
     def getDependenceNonUniformityFeatureValue(self):
-        r"""
-        **4. Dependence Non-Uniformity (DN)**
-
-        .. math::
-          DN = \frac{\sum^{N_d}_{j=1}\left(\sum^{N_g}_{i=1}{\textbf{P}(i,j)}\right)^2}{N_z}
-
-        Measures the similarity of dependence throughout the image, with a lower value indicating
-        more homogeneity among dependencies in the image.
-        """
         pd = self.coefficients["pd"]
         Nz = self.coefficients["Nz"]
 
-        return np.sum(pd**2, 1) / Nz
+        return torch.sum(pd**2, dim=1) / Nz
 
     def getDependenceNonUniformityNormalizedFeatureValue(self):
-        r"""
-        **5. Dependence Non-Uniformity Normalized (DNN)**
-
-        .. math::
-          DNN = \frac{\sum^{N_d}_{j=1}\left(\sum^{N_g}_{i=1}{\textbf{P}(i,j)}\right)^2}{N_z^2}
-
-        Measures the similarity of dependence throughout the image, with a lower value indicating
-        more homogeneity among dependencies in the image. This is the normalized version of the DLN formula.
-        """
         pd = self.coefficients["pd"]
         Nz = self.coefficients["Nz"]
 
-        return np.sum(pd**2, 1) / Nz**2
+        return torch.sum(pd**2, dim=1) / Nz**2
 
     def getGrayLevelVarianceFeatureValue(self):
-        r"""
-        **6. Gray Level Variance (GLV)**
-
-        .. math::
-          GLV = \displaystyle\sum^{N_g}_{i=1}\displaystyle\sum^{N_d}_{j=1}{p(i,j)(i - \mu)^2} \text{, where}
-          \mu = \displaystyle\sum^{N_g}_{i=1}\displaystyle\sum^{N_d}_{j=1}{ip(i,j)}
-
-        Measures the variance in grey level in the image.
-        """
         ivector = self.coefficients["ivector"]
         Nz = self.coefficients["Nz"]
         pg = (
             self.coefficients["pg"] / Nz[:, None]
         )  # divide by Nz to get the normalized matrix
 
-        u_i = np.sum(pg * ivector[None, :], 1, keepdims=True)
-        return np.sum(pg * (ivector[None, :] - u_i) ** 2, 1)
+        u_i = torch.sum(pg * ivector[None, :], dim=1, keepdims=True)
+        return torch.sum(pg * (ivector[None, :] - u_i) ** 2, dim=1)
 
     def getDependenceVarianceFeatureValue(self):
-        r"""
-        **7. Dependence Variance (DV)**
-
-        .. math::
-          DV = \displaystyle\sum^{N_g}_{i=1}\displaystyle\sum^{N_d}_{j=1}{p(i,j)(j - \mu)^2} \text{, where}
-          \mu = \displaystyle\sum^{N_g}_{i=1}\displaystyle\sum^{N_d}_{j=1}{jp(i,j)}
-
-        Measures the variance in dependence size in the image.
-        """
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]
         pd = (
             self.coefficients["pd"] / Nz[:, None]
         )  # divide by Nz to get the normalized matrix
 
-        u_j = np.sum(pd * jvector[None, :], 1, keepdims=True)
-        return np.sum(pd * (jvector[None, :] - u_j) ** 2, 1)
+        u_j = torch.sum(pd * jvector[None, :], dim=1, keepdims=True)
+        return torch.sum(pd * (jvector[None, :] - u_j) ** 2, dim=1)
 
     def getDependenceEntropyFeatureValue(self):
-        r"""
-        **8. Dependence Entropy (DE)**
-
-        .. math::
-          Dependence Entropy = -\displaystyle\sum^{N_g}_{i=1}\displaystyle\sum^{N_d}_{j=1}{p(i,j)\log_{2}(p(i,j)+\epsilon)}
-        """
-        eps = np.spacing(1)
+        eps = torch.finfo(self.P_gldm.dtype).eps
         Nz = self.coefficients["Nz"]
         p_gldm = (
             self.P_gldm / Nz[:, None, None]
         )  # divide by Nz to get the normalized matrix
 
-        return -np.sum(p_gldm * np.log2(p_gldm + eps), (1, 2))
+        return -torch.sum(p_gldm * torch.log2(p_gldm + eps), dim=(1, 2))
 
     @deprecated
     def getDependencePercentageFeatureValue(self):
-        r"""
-        **DEPRECATED. Dependence Percentage**
-
-        .. math::
-          \textit{dependence percentage} = \frac{N_z}{N_p}
-
-        .. warning::
-          This feature has been deprecated, as it would always compute 1. See
-          :ref:`here <radiomics-excluded-gldm-dependence-percentage-label>` for more details. **Enabling this feature will
-          result in the logging of a DeprecationWarning (does not interrupt extraction of other features), no value is
-          calculated for this features**
-        """
         msg = (
             "GLDM - Dependence Percentage always computes 1, "
             "see http://pyradiomics.readthedocs.io/en/latest/removedfeatures.html for more details"
@@ -250,123 +170,73 @@ class RadiomicsGLDM(base.RadiomicsFeaturesBase):
         raise DeprecationWarning(msg)
 
     def getLowGrayLevelEmphasisFeatureValue(self):
-        r"""
-        **9. Low Gray Level Emphasis (LGLE)**
-
-        .. math::
-          LGLE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\frac{\textbf{P}(i,j)}{i^2}}}{N_z}
-
-        Measures the distribution of low gray-level values, with a higher value indicating a greater
-        concentration of low gray-level values in the image.
-        """
         pg = self.coefficients["pg"]
         ivector = self.coefficients["ivector"]
         Nz = self.coefficients["Nz"]
 
-        return np.sum(pg / (ivector[None, :] ** 2), 1) / Nz
+        return torch.sum(pg / (ivector[None, :] ** 2), dim=1) / Nz
 
     def getHighGrayLevelEmphasisFeatureValue(self):
-        r"""
-        **10. High Gray Level Emphasis (HGLE)**
-
-        .. math::
-          HGLE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\textbf{P}(i,j)i^2}}{N_z}
-
-        Measures the distribution of the higher gray-level values, with a higher value indicating
-        a greater concentration of high gray-level values in the image.
-        """
         pg = self.coefficients["pg"]
         ivector = self.coefficients["ivector"]
         Nz = self.coefficients["Nz"]
 
-        return np.sum(pg * (ivector[None, :] ** 2), 1) / Nz
+        return torch.sum(pg * (ivector[None, :] ** 2), dim=1) / Nz
 
     def getSmallDependenceLowGrayLevelEmphasisFeatureValue(self):
-        r"""
-        **11. Small Dependence Low Gray Level Emphasis (SDLGLE)**
-
-        .. math::
-          SDLGLE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\frac{\textbf{P}(i,j)}{i^2j^2}}}{N_z}
-
-        Measures the joint distribution of small dependence with lower gray-level values.
-        """
         ivector = self.coefficients["ivector"]
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]
 
         return (
-            np.sum(
+            torch.sum(
                 self.P_gldm
                 / ((ivector[None, :, None] ** 2) * (jvector[None, None, :] ** 2)),
-                (1, 2),
+                dim=(1, 2),
             )
             / Nz
         )
 
     def getSmallDependenceHighGrayLevelEmphasisFeatureValue(self):
-        r"""
-        **12. Small Dependence High Gray Level Emphasis (SDHGLE)**
-
-        .. math:
-          SDHGLE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\frac{\textbf{P}(i,j)i^2}{j^2}}}{N_z}
-
-        Measures the joint distribution of small dependence with higher gray-level values.
-        """
         ivector = self.coefficients["ivector"]
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]
 
         return (
-            np.sum(
+            torch.sum(
                 self.P_gldm
                 * (ivector[None, :, None] ** 2)
                 / (jvector[None, None, :] ** 2),
-                (1, 2),
+                dim=(1, 2),
             )
             / Nz
         )
 
     def getLargeDependenceLowGrayLevelEmphasisFeatureValue(self):
-        r"""
-        **13. Large Dependence Low Gray Level Emphasis (LDLGLE)**
-
-        .. math::
-          LDLGLE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\frac{\textbf{P}(i,j)j^2}{i^2}}}{N_z}
-
-        Measures the joint distribution of large dependence with lower gray-level values.
-        """
         ivector = self.coefficients["ivector"]
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]
 
         return (
-            np.sum(
+            torch.sum(
                 self.P_gldm
                 * (jvector[None, None, :] ** 2)
                 / (ivector[None, :, None] ** 2),
-                (1, 2),
+                dim=(1, 2),
             )
             / Nz
         )
 
     def getLargeDependenceHighGrayLevelEmphasisFeatureValue(self):
-        r"""
-        **14. Large Dependence High Gray Level Emphasis (LDHGLE)**
-
-        .. math::
-          LDHGLE = \frac{\sum^{N_g}_{i=1}\sum^{N_d}_{j=1}{\textbf{P}(i,j)i^2j^2}}{N_z}
-
-        Measures the joint distribution of large dependence with higher gray-level values.
-        """
         ivector = self.coefficients["ivector"]
         jvector = self.coefficients["jvector"]
         Nz = self.coefficients["Nz"]
 
         return (
-            np.sum(
+            torch.sum(
                 self.P_gldm
                 * ((jvector[None, None, :] ** 2) * (ivector[None, :, None] ** 2)),
-                (1, 2),
+                dim=(1, 2),
             )
             / Nz
         )

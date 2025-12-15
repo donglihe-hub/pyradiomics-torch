@@ -17,7 +17,7 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
         raise NotImplementedError(msg)
 
     def _initSegmentBasedCalculation(self):
-        self.pixelSpacing = torch.flip(self.spacing, dims=[0])
+        self.pixelSpacing = self.spacing
 
         # Pad inputMask to prevent index-out-of-range errors
         self.logger.debug("Padding the mask with 0s")
@@ -27,7 +27,7 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
 
         # Reassign self.maskArray using the now-padded self.inputMask
         self.maskArray = self.maskArray == self.label
-        self.labelledVoxelCoordinates = torch.nonzero(self.maskArray != 0)
+        self.labelledVoxelCoordinates = torch.nonzero(self.maskArray != 0).T
 
         self.logger.debug("Pre-calculate Volume, Surface Area and Eigenvalues")
 
@@ -38,11 +38,11 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
         )
 
         # Compute eigenvalues and -vectors
-        coordinates = self.labelledVoxelCoordinates  # Transpose equals zip(*a)
-        Np = torch.tensor(coordinates.shape[0], device=self.device)
+        self.Np = torch.tensor(self.labelledVoxelCoordinates.shape[1], device=self.device)
+        coordinates = self.labelledVoxelCoordinates.T  # Transpose equals zip(*a)
         physicalCoordinates = coordinates * self.pixelSpacing[None, :]
         physicalCoordinates -= torch.mean(physicalCoordinates, dim=0)  # Centered at 0
-        physicalCoordinates /= torch.sqrt(Np)
+        physicalCoordinates /= torch.sqrt(self.Np)
         covariance = torch.matmul(physicalCoordinates.T.clone(), physicalCoordinates)
         self.eigenValues = torch.linalg.eigvalsh(covariance)
 
@@ -64,8 +64,7 @@ class RadiomicsShape(base.RadiomicsFeaturesBase):
 
     def getVoxelVolumeFeatureValue(self):
         z, y, x = self.pixelSpacing
-        Np = len(self.labelledVoxelCoordinates[0])
-        return Np * (z * x * y)
+        return self.Np * (z * x * y)
 
     def getSurfaceAreaFeatureValue(self):
         return self.SurfaceArea

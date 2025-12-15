@@ -128,3 +128,12 @@ def nanquantile(tensor: torch.Tensor,
 
     res = res.reshape(orig_shape)
     return res
+
+def delete_torch(x: torch.Tensor, indices: torch.Tensor, dim: int = 1):
+    indices = indices.to(dtype=torch.long, device=x.device)
+    mask = torch.ones(x.size(dim), dtype=torch.bool, device=x.device)
+
+    mask[indices] = False
+    keep = mask.nonzero(as_tuple=True)[0]
+
+    return x.index_select(dim, keep)

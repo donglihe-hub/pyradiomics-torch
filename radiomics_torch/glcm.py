@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import numpy as np
 import torch
 
 from radiomics_torch import base, cMatrices, deprecated
+from .cmatrices import calculate_glcm_torch
 
 # from cmatrices import
+from .utils import delete_torch
 
 
 class RadiomicsGLCM(base.RadiomicsFeaturesBase):
@@ -52,7 +53,7 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
         if self.voxelBased:
             matrix_args += [self.settings.get("kernelRadius", 1), voxelCoordinates]
 
-        P_glcm, angles = cMatrices.calculate_glcm(*matrix_args)
+        P_glcm, angles = calculate_glcm_torch(*matrix_args)
 
         self.logger.debug("Process calculated matrix")
 
@@ -64,22 +65,22 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
         # Optionally make GLCMs symmetrical for each angle
         if self.symmetricalGLCM:
             self.logger.debug("Create symmetrical matrix")
-            P_glcm = P_glcm + np.transpose(P_glcm, (0, 2, 1, 3))
+            P_glcm = P_glcm + P_glcm.permute(0, 2, 1, 3)
 
         # Optionally apply a weighting factor
         if self.weightingNorm is not None:
             self.logger.debug("Applying weighting (%s)", self.weightingNorm)
             pixelSpacing = self.inputImage.GetSpacing()[::-1]
-            weights = np.empty(len(angles))
+            weights = torch.empty(len(angles))
             for a_idx, a in enumerate(angles):
                 if self.weightingNorm == "infinity":
-                    weights[a_idx] = np.exp(-max(np.abs(a) * pixelSpacing) ** 2)
+                    weights[a_idx] = torch.exp(-max(torch.abs(a) * pixelSpacing) ** 2)
                 elif self.weightingNorm == "euclidean":
-                    weights[a_idx] = np.exp(
-                        -np.sum((np.abs(a) * pixelSpacing) ** 2)
+                    weights[a_idx] = torch.exp(
+                        -torch.sum((torch.abs(a) * pixelSpacing) ** 2)
                     )  # sqrt ^ 2 = 1
                 elif self.weightingNorm == "manhattan":
-                    weights[a_idx] = np.exp(-np.sum(np.abs(a) * pixelSpacing) ** 2)
+                    weights[a_idx] = torch.exp(-torch.sum(torch.abs(a) * pixelSpacing) ** 2)
                 elif self.weightingNorm == "no_weighting":
                     weights[a_idx] = 1
                 else:
@@ -89,26 +90,26 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
                     )
                     weights[a_idx] = 1
 
-            P_glcm = np.sum(P_glcm * weights[None, None, None, :], 3, keepdims=True)
+            P_glcm = torch.sum(P_glcm * weights[None, None, None, :], dim=3, keepdims=True)
 
-        sumP_glcm = np.sum(P_glcm, (1, 2))
+        sumP_glcm = torch.sum(P_glcm, dim=(1, 2))
 
         # Delete empty angles if no weighting is applied
         if P_glcm.shape[3] > 1:
-            emptyAngles = np.where(np.sum(sumP_glcm, 0) == 0)
+            emptyAngles = torch.where(torch.sum(sumP_glcm, dim=0) == 0)
             if len(emptyAngles[0]) > 0:  # One or more angles are 'empty'
                 self.logger.debug(
                     "Deleting %d empty angles:\n%s",
                     len(emptyAngles[0]),
                     angles[emptyAngles],
                 )
-                P_glcm = np.delete(P_glcm, emptyAngles, 3)
-                sumP_glcm = np.delete(sumP_glcm, emptyAngles, 1)
+                P_glcm = delete_torch(P_glcm, emptyAngles, 3)
+                sumP_glcm = delete_torch(sumP_glcm, emptyAngles, 1)
             else:
                 self.logger.debug("No empty angles")
 
         # Mark empty angles with NaN, allowing them to be ignored in feature calculation
-        sumP_glcm[sumP_glcm == 0] = np.nan
+        sumP_glcm[sumP_glcm == 0] = torch.nan
         # Normalize each glcm
         P_glcm /= sumP_glcm[:, None, None, :]
 
@@ -122,11 +123,11 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
         self.logger.debug("Calculating GLCM coefficients")
 
         Ng = self.coefficients["Ng"]
-        eps = torch.finfo(torch.float32).eps.to(self.device)
+        eps = torch.finfo(torch.float32).eps
 
         NgVector = self.coefficients["grayLevels"].float()
         # shape = (Ng, Ng)
-        i, j = torch.meshgrid(NgVector, NgVector, indexing="ij", sparse=True)
+        i, j = torch.meshgrid(NgVector, NgVector, indexing="ij")
         # shape = (2*Ng-1)
         kValuesSum = torch.arange(2, (Ng * 2) + 1, dtype=torch.float, device=self.device)
         # shape = (Ng-1)
@@ -142,16 +143,20 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
         uy = torch.sum(j[None, :, :, None] * self.P_glcm, dim=(1, 2), keepdims=True)
 
         # shape = (Nv, 2*Ng-1, angles)
-        pxAddy = torch.tensor(
-            [torch.sum(self.P_glcm[:, i + j == k, :], dim=1) for k in kValuesSum]
-        ).transpose((1, 0, 2))
+        pxAddy = torch.einsum(
+            "amd,km->akd",
+            self.P_glcm.reshape(self.P_glcm.size(0), -1, self.P_glcm.size(3)),
+            (i + j).flatten().eq(kValuesSum[:, None]).to(self.P_glcm.dtype)
+        )
         # shape = (Nv, Ng, angles)
-        pxSuby = torch.tensor(
-            [torch.sum(self.P_glcm[:, torch.abs(i - j) == k, :], dim=1) for k in kValuesDiff]
-        ).transpose((1, 0, 2))
+        pxSuby = torch.einsum(
+            "amd,km->akd",
+            self.P_glcm.reshape(self.P_glcm.size(0), -1, self.P_glcm.size(3)),
+            (torch.abs(i - j).flatten().eq(kValuesDiff[:, None])).to(self.P_glcm.dtype)
+        )
 
         # shape = (Nv, angles)
-        HXY = (-1) * torch.sum((self.P_glcm * torch.log2(self.P_glcm + eps)), dim=(1, 2))
+        HXY = -torch.sum((self.P_glcm * torch.log2(self.P_glcm + eps)), dim=(1, 2))
         
         self.coefficients["eps"] = eps
         self.coefficients["i"] = i
@@ -177,8 +182,8 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
         """
         i = self.coefficients["i"]
         j = self.coefficients["j"]
-        ac = torch.sum(self.P_glcm * (i * j)[None, :, :, None], (1, 2))
-        return torch.nanmean(ac, dim=(1, 2))
+        ac = torch.sum(self.P_glcm * (i * j)[None, :, :, None], dim=(1, 2))
+        return torch.nanmean(ac, dim=1)
 
     def getJointAverageFeatureValue(self):
         if not self.symmetricalGLCM:
@@ -380,31 +385,39 @@ class RadiomicsGLCM(base.RadiomicsFeaturesBase):
         py = self.coefficients["py"]
         eps = self.coefficients["eps"]
 
-        # Calculate Q (shape (i, i, d)). To prevent division by 0, add epsilon (such a division can occur when in a ROI
-        # along a certain angle, voxels with gray level i do not have neighbors
+        # Q: (v, i, j, d)
         Q = (
             self.P_glcm[:, :, None, 0, :] * self.P_glcm[:, None, :, 0, :]
-        ) / (  # slice: v, i, j, k, d
-            px[:, :, None, 0, :] * py[:, None, :, 0, :] + eps
-        )  # sum over k (4th axis --> index 3)
+        ) / (px[:, :, None, 0, :] * py[:, None, :, 0, :] + eps)
 
         for gl in range(1, self.P_glcm.shape[1]):
             Q += (
                 self.P_glcm[:, :, None, gl, :] * self.P_glcm[:, None, :, gl, :]
-            ) / (  # slice: v, i, j, k, d
-                px[:, :, None, 0, :] * py[:, None, :, gl, :] + eps
-            )  # sum over k (4th axis --> index 3)
+            ) / (px[:, :, None, 0, :] * py[:, None, :, gl, :] + eps)
 
-        # calculation of eigenvalues if performed on last 2 dimensions, therefore, move the angles dimension (d) forward
-        Q_eigenValue = torch.linalg.eigvals(Q.permute(0, 3, 1, 2))
-        Q_eigValue, _ = torch.sort(Q_eigenValue, dim=-1)  # 最后一维升序  # sorts along last axis --> eigenvalues, low to high
+        # 形状对齐 NumPy: Q.transpose((0, 3, 1, 2)) -> (v, d, i, j)
+        Q_t = Q.permute(0, 3, 1, 2)
 
-        if Q_eigenValue.shape[2] < 2:
-            return 1  # flat region
+        # 特征值: 形状 (v, d, i)，complex dtype
+        Q_eigenValue = torch.linalg.eigvals(Q_t)
 
-        MCC = torch.sqrt(Q_eigValue[:, :, -2])  # 2nd highest eigenvalue
+        # Torch 不支持对 complex 排序：我们按“实部”来排
+        Q_real = Q_eigenValue.real                      # (v, d, i)
+        Q_real_sorted, _ = torch.sort(Q_real, dim=-1)   # 实部从小到大
 
-        return torch.nanmean(MCC, dim=1).real
+        # flat region：每个 GLCM 只有 1 个特征值
+        if Q_real_sorted.shape[2] < 2:
+            return torch.tensor(
+                1.0, dtype=self.P_glcm.dtype, device=self.P_glcm.device
+            )
+
+        # 取倒数第二大的特征值（≥0，防数值抖动）
+        lambda2 = Q_real_sorted[:, :, -2].clamp_min(0)
+
+        MCC = torch.sqrt(lambda2)  # (v, d)
+
+        # 沿着 angle 维度做 nanmean，对应 np.nanmean(MCC, 1)
+        return torch.nanmean(MCC, dim=1)
 
     def getIdmnFeatureValue(self):
         pxSuby = self.coefficients["pxSuby"]
