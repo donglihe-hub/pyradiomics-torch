@@ -562,7 +562,6 @@ def calculate_glrlm_torch(
     force2Ddimension: int,
     kernelRadius: int = 0,
     voxels: torch.Tensor | None = None,
-    device=None,
     dtype=torch.float32,
 ):
     """
@@ -586,11 +585,7 @@ def calculate_glrlm_torch(
     glrlm : Tensor, 形状 (Nvox, Ng, Nr, Na)
     angles: LongTensor, 形状 (Na, Nd)
     """
-    if device is None:
-        device = image.device
-
-    image = image.to(device=device, dtype=torch.int64)
-    mask = mask.to(device=device, dtype=torch.bool)
+    device = image.device
 
     Nd = image.ndim
     size = list(image.shape)
@@ -632,8 +627,10 @@ def calculate_glrlm_torch(
     # ---- 输出 glrlm ----
     glrlm = torch.zeros((Nvox, Ng, Nr, Na), dtype=dtype, device=device)
 
+    bb_cache: dict[tuple, torch.Tensor] = {}
+
     for v in range(Nvox):
-        # bounding box：和 C 版 set_bb 一致
+        # 1) 计算当前 voxel 的 bounding box
         bb_lo, bb_hi = set_bb_torch(
             v=v,
             size=size,
@@ -642,24 +639,31 @@ def calculate_glrlm_torch(
             Nvox=Nvox,
             kernelRadius=kernelRadius,
             force2Ddimension=force2Ddimension,
-        )  # bb_lo[d], bb_hi[d] 都是闭区间
+        )  # bb_lo[d], bb_hi[d] 是闭区间
 
-        glrlm_v = _calculate_glrlm_single_torch(
-            image_flat=image_flat,
-            mask_flat=mask_flat,
-            size=size,
-            bb_lo=bb_lo,
-            bb_hi=bb_hi,
-            strides=strides,
-            angles=angles,
-            Na=Na,
-            Nd=Nd,
-            Ng=Ng,
-            Nr=Nr,
-            Ni=Ni,
-            dtype=dtype,
-            device=device,
-        )
+        # 2) 用 (bb_lo, bb_hi) 作为 key 做缓存
+        key = tuple(bb_lo + bb_hi)  # 例如 (z0,y0,x0,z1,y1,x1)
+
+        if key in bb_cache:
+            glrlm_v = bb_cache[key]
+        else:
+            glrlm_v = _calculate_glrlm_single_torch(
+                image_flat=image_flat,
+                mask_flat=mask_flat,
+                size=size,
+                bb_lo=bb_lo,
+                bb_hi=bb_hi,
+                strides=strides,
+                angles=angles,
+                Na=Na,
+                Nd=Nd,
+                Ng=Ng,
+                Nr=Nr,
+                Ni=Ni,
+                dtype=dtype,
+            )
+            bb_cache[key] = glrlm_v
+
         glrlm[v] = glrlm_v
 
     return glrlm, angles
@@ -679,14 +683,12 @@ def _calculate_glrlm_single_torch(
     Nr: int,
     Ni: int,
     dtype=torch.float32,
-    device=None,
 ):
     """
     对应 C 版 calculate_glrlm 的单 voxel/ROI 版本。
     返回 glrlm_v: (Ng, Nr, Na)
     """
-    if device is None:
-        device = image_flat.device
+    device = image_flat.device
 
     glrlm_v = torch.zeros((Ng, Nr, Na), dtype=dtype, device=device)
 
