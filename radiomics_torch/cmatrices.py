@@ -356,7 +356,7 @@ def calculate_gldm_torch(
     kernelRadius: int = 0,
     voxels: torch.Tensor | None = None,
     device=None,
-    dtype=torch.double,
+    dtype=torch.float32,
 ):
     """
     Torch 版 GLDM 计算，逻辑对应 cmatrices_calculate_gldm + calculate_gldm.
@@ -467,7 +467,7 @@ def _calculate_gldm_single_torch(
     Ng: int,
     alpha: int,
     max_dep: int,
-    dtype=torch.double,
+    dtype=torch.float32,
     device=None,
 ):
     """
@@ -563,7 +563,7 @@ def calculate_glrlm_torch(
     kernelRadius: int = 0,
     voxels: torch.Tensor | None = None,
     device=None,
-    dtype=torch.double,
+    dtype=torch.float32,
 ):
     """
     Torch 版 GLRLM 计算，对应 C 函数 cmatrices_calculate_glrlm + calculate_glrlm.
@@ -678,7 +678,7 @@ def _calculate_glrlm_single_torch(
     Ng: int,
     Nr: int,
     Ni: int,
-    dtype=torch.double,
+    dtype=torch.float32,
     device=None,
 ):
     """
@@ -1580,7 +1580,7 @@ def calculate_ngtdm_torch(
     kernelRadius: int = 0,
     voxels: torch.Tensor | None = None,
     device=None,
-    dtype=torch.double,
+    dtype=torch.float32,
 ) -> torch.Tensor:
     """
     Torch 版 NGTDM 计算，逻辑对应 C 里的 cmatrices_calculate_ngtdm + calculate_ngtdm。
