@@ -112,9 +112,9 @@ class RadiomicsGLRLM(base.RadiomicsFeaturesBase):
         pr = torch.sum(self.P_glrlm, dim=1)  # shape (Nvox, Nr, Na)
         pg = torch.sum(self.P_glrlm, dim=2)  # shape (Nvox, Ng, Na)
 
-        ivector = self.coefficients["grayLevels"].to(dtype=torch.float64)  # shape (Ng,)
+        ivector = self.coefficients["grayLevels"].to(dtype=torch.float64, device=self.device)  # shape (Ng,)
         jvector = torch.arange(
-            1, self.P_glrlm.shape[2] + 1, dtype=torch.float64
+            1, self.P_glrlm.shape[2] + 1, dtype=torch.float64, device=self.device
         )  # shape (Nr,)
 
         # Delete columns that run lengths not present in the ROI
