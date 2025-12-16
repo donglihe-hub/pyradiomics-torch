@@ -1,3 +1,4 @@
+from typing import List, Optional
 import torch
 from itertools import product
 import torch.nn.functional as F
@@ -552,6 +553,110 @@ def _calculate_gldm_single_torch(
 
 
 ### glrlm
+
+import torch
+import torch.nn.functional as F
+
+
+def shift3d(x, direction):
+    """
+    x: (B=1, C=1, Z, Y, X)
+    direction: (dz, dy, dx)
+    """
+    dz, dy, dx = direction
+    _, _, Z, Y, X = x.shape
+
+    pad = [
+        max(dx,0), max(-dx,0),   # left/right
+        max(dy,0), max(-dy,0),   # top/bottom
+        max(dz,0), max(-dz,0),   # front/back
+    ]
+
+    x_pad = F.pad(x, pad)
+    z0 = max(-dz,0)
+    y0 = max(-dy,0)
+    x0 = max(-dx,0)
+
+    return x_pad[:, :, z0:z0+Z, y0:y0+Y, x0:x0+X]
+
+
+def glrlm_vectorized_3d(
+    image,     # (Z,Y,X), int64, values ∈ [1..Ng]
+    mask,      # (Z,Y,X), bool
+    Ng: int,
+    Nr: int,
+    directions,   # list of (dz,dy,dx)
+    device=None,
+):
+    """
+    返回 P_glrlm: (Ng, Nr, Na) —— 不含 batch 维。
+    """
+    if device is None:
+        device = image.device
+
+    image = image.to(device=device, dtype=torch.int64)
+    mask  = mask.to(device=device, dtype=torch.bool)
+
+    Z, Y, X = image.shape
+    Na = len(directions)
+
+    # output
+    P = torch.zeros((Ng, Nr, Na), dtype=torch.float32, device=device)
+
+    # (1,1,Z,Y,X)
+    img5 = image.unsqueeze(0).unsqueeze(0)
+    msk5 = mask.unsqueeze(0).unsqueeze(0)
+
+    # flatten helpers
+    def flatten_runs(run_continue, vals):
+        """
+        run_continue: (N,) bool
+        vals:         (N,) int64
+        返回 run_start_idx, run_len, gray
+        """
+        N = run_continue.numel()
+        rc = run_continue
+        rc_prev = torch.zeros_like(rc)
+        rc_prev[1:] = rc[:-1]
+
+        run_start = rc & (~rc_prev)
+        run_end   = rc_prev & (~rc)
+
+        idx = torch.arange(N, device=device)
+
+        start_idx = idx[run_start]
+        end_idx   = idx[run_end]
+
+        # 如果最后 run 没有结束，补一个结束点
+        if end_idx.numel() < start_idx.numel():
+            end_idx = torch.cat([end_idx, idx[-1:].clone()])
+
+        run_lengths = (end_idx - start_idx + 1).clamp(max=Nr).long()
+        run_gray = (vals[start_idx] - 1).clamp(0, Ng-1).long()
+
+        return run_gray, run_lengths
+
+    # ---- 对每个方向向量化计算 ----
+    for a, (dz,dy,dx) in enumerate(directions):
+        img_s = shift3d(img5, (dz,dy,dx))[0,0]  # (Z,Y,X)
+        msk_s = shift3d(msk5, (dz,dy,dx))[0,0]
+
+        same = (image == img_s)
+        valid = mask & msk_s
+        run_continue = (same & valid).flatten()
+        vals = image.flatten()
+
+        if run_continue.any():
+            run_gray, run_lengths = flatten_runs(run_continue, vals)
+
+            # bincount accumulate
+            idx = run_gray * Nr + (run_lengths - 1)
+            bc = torch.bincount(idx, minlength=Ng*Nr)
+
+            P[:,:,a] = bc.view(Ng, Nr)
+
+    return P
+
 
 def calculate_glrlm_torch(
     image: torch.Tensor,
@@ -1572,6 +1677,275 @@ def calculate_glszm_torch_vectorized(
 ### ngtdm
 
 # cmatrices.py
+# def calculate_ngtdm_torch(
+#     image: torch.Tensor,
+#     mask: torch.Tensor,
+#     distances,
+#     Ng: int,
+#     force2D: bool,
+#     force2Ddimension: int,
+#     kernelRadius: int = 0,
+#     voxels: torch.Tensor | None = None,
+#     device=None,
+#     dtype=torch.float32,
+# ) -> torch.Tensor:
+#     """
+#     Torch 版 NGTDM 计算，逻辑对应 C 里的 cmatrices_calculate_ngtdm + calculate_ngtdm。
+
+#     参数
+#     ----
+#     image : torch.Tensor (int)
+#         N 维整型张量，形状 (N1, N2, ..., Nd)，灰度值范围 [1..Ng]。
+#     mask : torch.Tensor (bool 或 0/1)
+#         同 shape，表示 ROI。
+#     distances : 1D list/tensor
+#         距离列表，对应 C 版 distances_obj。
+#     Ng : int
+#         灰度级数。
+#     force2D : bool
+#         是否强制 2D。
+#     force2Ddimension : int
+#         如果 force2D=True，则这个维度视为 out-of-plane（只允许 offset=0）。
+#     kernelRadius : int, default 0
+#         体素级（voxel-based）提取的核半径；0 表示整块 ROI（非 voxel-based）。
+#     voxels : torch.Tensor | None
+#         体素级提取时的中心点索引，形状 (Nvox, Nd)，每行是一个体素的坐标。
+#     device : torch.device | None
+#         计算使用的 device，默认 image.device。
+#     dtype : torch.dtype
+#         输出的浮点精度，默认 torch.double。
+
+#     返回
+#     ----
+#     torch.Tensor
+#         形状 (Nvox, Ng, 3)，其中最后一维分别为:
+#         [:, :, 0] = n_i
+#         [:, :, 1] = s_i
+#         [:, :, 2] = 灰度值 i (1..Ng)
+#     """
+#     if device is None:
+#         device = image.device
+
+#     image = image.to(device=device, dtype=torch.long)
+#     mask = mask.to(device=device)
+#     if mask.dtype != torch.bool:
+#         mask = mask != 0
+
+#     Nd = image.ndim
+#     size = [int(s) for s in image.shape]
+
+#     # 处理 distances
+#     distances = torch.as_tensor(distances, device=device, dtype=torch.long).view(-1)
+#     distances_list = [int(d.item()) for d in distances]
+#     if len(distances_list) == 0:
+#         raise ValueError("distances must contain at least one element")
+
+#     # force2D 逻辑：和 C 里一样，不 force2D 就把维度设为 -1
+#     if not force2D:
+#         force2Ddimension = -1
+#     else:
+#         if not (0 <= force2Ddimension < Nd):
+#             force2Ddimension = -1
+
+#     # ---- 下面两个 helper 是 C 版 get_angle_count / build_angles 的 torch 版本 ----
+
+#     def _get_angle_count(size_, distances_, Nd_, bidirectional: bool, force2Ddim: int) -> int:
+#         Na = 0
+#         for dist in distances_:
+#             if dist < 1:
+#                 return 0
+#             Na_d = 1
+#             Na_dd = 1
+#             for dim_idx in range(Nd_):
+#                 if dim_idx == force2Ddim:
+#                     continue
+#                 if dist < size_[dim_idx]:
+#                     Na_d *= (2 * dist + 1)
+#                     Na_dd *= (2 * dist - 1)
+#                 else:
+#                     # 被图像尺寸限制
+#                     Na_d *= (2 * (size_[dim_idx] - 1) + 1)
+#                     Na_dd *= (2 * (size_[dim_idx] - 1) + 1)
+#             Na += (Na_d - Na_dd)
+#         # NGTDM 用的是 bidirectional=True，所以不会走到这里
+#         if not bidirectional:
+#             Na //= 2
+#         return Na
+
+#     def _build_angles(size_, distances_, Nd_, force2Ddim: int, bidirectional: bool = True) -> torch.Tensor:
+#         size_ = list(size_)
+#         distances_ = list(distances_)
+#         Na = _get_angle_count(size_, distances_, Nd_, bidirectional, force2Ddim)
+#         if Na <= 0:
+#             raise ValueError("No valid angles could be generated for the given distances and image size")
+
+#         max_distance = max(distances_)
+#         n_offsets = 2 * max_distance + 1
+
+#         # offset_stride 用来枚举各维 offset 组合
+#         offset_stride = [0] * Nd_
+#         offset_stride[Nd_ - 1] = 1
+#         for dim_idx in range(Nd_ - 2, -1, -1):
+#             offset_stride[dim_idx] = offset_stride[dim_idx + 1] * n_offsets
+
+#         angles = [[0] * Nd_ for _ in range(Na)]
+#         new_a_idx = 0  # 控制 offset 组合
+#         a_idx = 0      # 已接受的 angle 数
+
+#         while a_idx < Na:
+#             a_dist = 0
+#             candidate = [0] * Nd_
+#             for dim_idx in range(Nd_):
+#                 offset = max_distance - (new_a_idx // offset_stride[dim_idx]) % n_offsets
+#                 # 非法 angle：超出尺寸或在 force2Ddim 上有非 0 offset
+#                 if (
+#                     (dim_idx == force2Ddim and offset != 0)
+#                     or offset >= size_[dim_idx]
+#                     or offset <= -size_[dim_idx]
+#                 ):
+#                     a_dist = -1
+#                     break
+#                 candidate[dim_idx] = offset
+#                 if a_dist < abs(offset):
+#                     a_dist = abs(offset)
+
+#             new_a_idx += 1
+
+#             # a_dist < 1: 要么 0 向量，要么非法 angle，直接丢弃
+#             if a_dist < 1:
+#                 continue
+
+#             # 只保留距离在 distances_ 里的 angle
+#             if any(a_dist == d for d in distances_):
+#                 angles[a_idx] = candidate
+#                 a_idx += 1
+
+#         return torch.tensor(angles, dtype=torch.long, device=device)
+
+#     # 为 NGTDM 生成 angles（bidirectional=True）
+#     angles = _build_angles(size, distances_list, Nd, force2Ddimension, bidirectional=True)
+#     Na = int(angles.shape[0])
+
+#     # 按 C 顺序计算展平 strides（元素数量，而不是字节）
+#     strides = [1] * Nd
+#     for d in range(Nd - 2, -1, -1):
+#         strides[d] = strides[d + 1] * size[d + 1]
+
+#     image_flat = image.reshape(-1)
+#     mask_flat = mask.reshape(-1)
+
+#     def _single_ngtdm(bb: list[int]) -> torch.Tensor:
+#         """
+#         对一个 bounding box 计算 NGTDM。
+#         bb: 长度 2*Nd 的列表 [lo0..lo{Nd-1}, hi0..hi{Nd-1}]
+#         """
+#         ngtdm = torch.zeros((Ng, 3), dtype=dtype, device=device)
+#         # 第 2 列填 1..Ng
+#         ngtdm[:, 2] = torch.arange(1, Ng + 1, dtype=dtype, device=device)
+
+#         # 整个 image 的元素个数
+#         Ni = 1
+#         for s in size:
+#             Ni *= s
+
+#         # 起始 flat index（bb 的下界）
+#         i = 0
+#         for d in range(Nd):
+#             i += bb[d] * strides[d]
+
+#         cur_idx = [0] * Nd
+#         ngtdm_idx_max = Ng * 3
+
+#         while i < Ni:
+#             # 先在各维上把 i 调到 bounding box 内
+#             for d in range(Nd - 1, 0, -1):
+#                 cur_idx[d] = (i % strides[d - 1]) // strides[d]
+#                 if cur_idx[d] > bb[Nd + d]:
+#                     i += (size[d] - cur_idx[d] + bb[d]) * strides[d]
+#                     cur_idx[d] = bb[d]
+#                 elif cur_idx[d] < bb[d]:
+#                     i += (bb[d] - cur_idx[d]) * strides[d]
+#                     cur_idx[d] = bb[d]
+
+#             cur_idx[0] = i // strides[0]
+#             if cur_idx[0] > bb[Nd]:
+#                 # 超出第 0 维上界，整个 bounding box 结束
+#                 break
+
+#             if mask_flat[i]:
+#                 count = 0.0
+#                 ssum = 0.0
+
+#                 # 遍历所有邻域方向
+#                 for a in range(Na):
+#                     j = i
+#                     for d in range(Nd):
+#                         off = int(angles[a, d].item())
+#                         idx_d = cur_idx[d]
+#                         # 出界就标记 j=i，表示该方向无邻居
+#                         if idx_d + off < bb[d] or idx_d + off > bb[Nd + d]:
+#                             j = i
+#                             break
+#                         j += off * strides[d]
+
+#                     if j != i and mask_flat[j]:
+#                         count += 1.0
+#                         ssum += int(image_flat[j].item())
+
+#                 if count == 0.0:
+#                     diff = 0.0
+#                 else:
+#                     diff = float(int(image_flat[i].item()) - (ssum / count))
+#                     if diff < 0.0:
+#                         diff = -diff
+
+#                 gl_val = int(image_flat[i].item())
+#                 ngtdm_idx = (gl_val - 1) * 3
+#                 if gl_val <= 0 or ngtdm_idx >= ngtdm_idx_max:
+#                     raise IndexError("NGTDM: gray level index out of range")
+
+#                 # n_i
+#                 ngtdm[gl_val - 1, 0] += 1.0
+#                 # s_i 累加绝对差
+#                 ngtdm[gl_val - 1, 1] += diff
+
+#             i += 1
+
+#         return ngtdm
+
+#     # ---- voxel-based / 非 voxel-based 两种模式 ----
+
+#     if voxels is None or kernelRadius <= 0:
+#         # 整块 ROI，一个 NGTDM
+#         bb_lo = [0] * Nd
+#         bb_hi = [s - 1 for s in size]
+#         bb = bb_lo + bb_hi
+#         result = _single_ngtdm(bb).unsqueeze(0)  # (1, Ng, 3)
+#     else:
+#         voxels = voxels.to(device=device, dtype=torch.long)
+#         if voxels.ndim != 2 or voxels.shape[1] != Nd:
+#             raise ValueError(f"voxels must have shape (Nvox, Nd={Nd}), got {tuple(voxels.shape)}")
+
+#         Nvox = int(voxels.shape[0])
+#         result = torch.empty((Nvox, Ng, 3), dtype=dtype, device=device)
+
+#         for v in range(Nvox):
+#             bb_lo: list[int] = []
+#             bb_hi: list[int] = []
+#             for d in range(Nd):
+#                 center_d = int(voxels[v, d].item())
+#                 if force2D and d == force2Ddimension:
+#                     lo = hi = center_d
+#                 else:
+#                     lo = max(center_d - kernelRadius, 0)
+#                     hi = min(center_d + kernelRadius, size[d] - 1)
+#                 bb_lo.append(lo)
+#                 bb_hi.append(hi)
+#             bb = bb_lo + bb_hi
+#             result[v] = _single_ngtdm(bb)
+
+#     return result
+
 def calculate_ngtdm_torch(
     image: torch.Tensor,
     mask: torch.Tensor,
@@ -1580,9 +1954,9 @@ def calculate_ngtdm_torch(
     force2D: bool,
     force2Ddimension: int,
     kernelRadius: int = 0,
-    voxels: torch.Tensor | None = None,
+    voxels: Optional[torch.Tensor] = None,
     device=None,
-    dtype=torch.float32,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """
     Torch 版 NGTDM 计算，逻辑对应 C 里的 cmatrices_calculate_ngtdm + calculate_ngtdm。
@@ -1608,7 +1982,7 @@ def calculate_ngtdm_torch(
     device : torch.device | None
         计算使用的 device，默认 image.device。
     dtype : torch.dtype
-        输出的浮点精度，默认 torch.double。
+        输出的浮点精度，默认 torch.float32。
 
     返回
     ----
@@ -1627,24 +2001,30 @@ def calculate_ngtdm_torch(
         mask = mask != 0
 
     Nd = image.ndim
-    size = [int(s) for s in image.shape]
+    size: List[int] = [int(s) for s in image.shape]
 
     # 处理 distances
     distances = torch.as_tensor(distances, device=device, dtype=torch.long).view(-1)
-    distances_list = [int(d.item()) for d in distances]
+    distances_list: List[int] = [int(d.item()) for d in distances]
     if len(distances_list) == 0:
         raise ValueError("distances must contain at least one element")
 
-    # force2D 逻辑：和 C 里一样，不 force2D 就把维度设为 -1
+    # force2D 逻辑：和 C 一样，不 force2D 就把维度设为 -1
     if not force2D:
         force2Ddimension = -1
     else:
         if not (0 <= force2Ddimension < Nd):
             force2Ddimension = -1
 
-    # ---- 下面两个 helper 是 C 版 get_angle_count / build_angles 的 torch 版本 ----
+    # ================== helper: angle count & build angles ==================
 
-    def _get_angle_count(size_, distances_, Nd_, bidirectional: bool, force2Ddim: int) -> int:
+    def _get_angle_count(
+        size_: List[int],
+        distances_: List[int],
+        Nd_: int,
+        bidirectional: bool,
+        force2Ddim: int,
+    ) -> int:
         Na = 0
         for dist in distances_:
             if dist < 1:
@@ -1667,7 +2047,13 @@ def calculate_ngtdm_torch(
             Na //= 2
         return Na
 
-    def _build_angles(size_, distances_, Nd_, force2Ddim: int, bidirectional: bool = True) -> torch.Tensor:
+    def _build_angles(
+        size_: List[int],
+        distances_: List[int],
+        Nd_: int,
+        force2Ddim: int,
+        bidirectional: bool = True,
+    ) -> torch.Tensor:
         size_ = list(size_)
         distances_ = list(distances_)
         Na = _get_angle_count(size_, distances_, Nd_, bidirectional, force2Ddim)
@@ -1722,36 +2108,119 @@ def calculate_ngtdm_torch(
     Na = int(angles.shape[0])
 
     # 按 C 顺序计算展平 strides（元素数量，而不是字节）
-    strides = [1] * Nd
+    strides: List[int] = [1] * Nd
     for d in range(Nd - 2, -1, -1):
         strides[d] = strides[d + 1] * size[d + 1]
+
+    strides_t = torch.tensor(strides, device=device, dtype=torch.long)
 
     image_flat = image.reshape(-1)
     mask_flat = mask.reshape(-1)
 
-    def _single_ngtdm(bb: list[int]) -> torch.Tensor:
+    # 整个 image 元素个数（给 bbox 版本用）
+    Ni_total = 1
+    for s in size:
+        Ni_total *= s
+
+    # ================== 优化后的整块 ROI 版本（非 voxel-based） ==================
+    def _single_ngtdm_vectorized() -> torch.Tensor:
+        """
+        整块 ROI 的 NGTDM（非 voxel-based），向量化实现。
+        返回 shape (Ng, 3): [n_i, s_i, gray_level_i]
+        """
+        # 1. ROI 内所有体素坐标和线性索引
+        coords = torch.nonzero(mask, as_tuple=False)  # (Nvox, Nd)
+        if coords.numel() == 0:
+            out = torch.zeros((Ng, 3), dtype=dtype, device=device)
+            out[:, 2] = torch.arange(1, Ng + 1, dtype=dtype, device=device)
+            return out
+
+        coords = coords.to(torch.long)
+        Nvox = coords.shape[0]
+
+        base_idx = (coords * strides_t).sum(dim=1)  # (Nvox,)
+        center_gray = image_flat[base_idx].to(torch.long)  # (Nvox,)
+
+        count = torch.zeros(Nvox, dtype=dtype, device=device)
+        ssum = torch.zeros(Nvox, dtype=dtype, device=device)
+
+        size_t = torch.tensor(size, device=device, dtype=torch.long)
+
+        # 2. 对每个 angle，向量化计算邻居并累积
+        for a in range(Na):
+            offset_vec = angles[a]  # (Nd,)
+            # 邻居坐标
+            neigh_coords = coords + offset_vec  # (Nvox, Nd)
+
+            # 先做边界检查：0 <= coord < size
+            valid = torch.ones(Nvox, dtype=torch.bool, device=device)
+            for d in range(Nd):
+                valid &= (neigh_coords[:, d] >= 0) & (neigh_coords[:, d] < size_t[d])
+
+            if not valid.any():
+                continue
+
+            valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(1)
+            neigh_coords_valid = neigh_coords[valid_idx]
+            neigh_idx_valid = (neigh_coords_valid * strides_t).sum(dim=1)
+
+            # 邻居是否在 ROI 内
+            neigh_in_roi = mask_flat[neigh_idx_valid]
+            if not neigh_in_roi.any():
+                continue
+
+            neigh_valid_idx = valid_idx[neigh_in_roi]
+            neigh_idx_roi = neigh_idx_valid[neigh_in_roi]
+
+            # 有效邻居灰度值
+            neigh_val = image_flat[neigh_idx_roi].to(dtype)
+
+            # 对应中心体素累加
+            count[neigh_valid_idx] += 1.0
+            ssum[neigh_valid_idx] += neigh_val
+
+        # 3. 计算每个体素的 diff = |center - neighbor_mean|
+        diff = torch.zeros(Nvox, dtype=dtype, device=device)
+        has_neighbors = count > 0
+        if has_neighbors.any():
+            neighbor_mean = torch.zeros_like(diff)
+            neighbor_mean[has_neighbors] = ssum[has_neighbors] / count[has_neighbors]
+            diff[has_neighbors] = (center_gray.to(dtype) - neighbor_mean[has_neighbors]).abs()
+
+        # 4. 按灰度级聚合到 n_i & s_i
+        gl = center_gray.clamp(min=1, max=Ng)
+        gl_idx = gl - 1  # 0..Ng-1
+        ones = torch.ones_like(diff)
+
+        n_i = torch.bincount(gl_idx, weights=ones, minlength=Ng).to(dtype)
+        s_i = torch.bincount(gl_idx, weights=diff, minlength=Ng).to(dtype)
+
+        ngtdm = torch.empty((Ng, 3), dtype=dtype, device=device)
+        ngtdm[:, 0] = n_i
+        ngtdm[:, 1] = s_i
+        ngtdm[:, 2] = torch.arange(1, Ng + 1, dtype=dtype, device=device)
+        return ngtdm
+
+    # ================== 原始 bbox 扫描版（给 voxel-based 用） ==================
+    def _single_ngtdm_bbox(bb: List[int]) -> torch.Tensor:
         """
         对一个 bounding box 计算 NGTDM。
         bb: 长度 2*Nd 的列表 [lo0..lo{Nd-1}, hi0..hi{Nd-1}]
+        使用的是你原来的 while + cur_idx + strides 扫描逻辑。
         """
         ngtdm = torch.zeros((Ng, 3), dtype=dtype, device=device)
         # 第 2 列填 1..Ng
         ngtdm[:, 2] = torch.arange(1, Ng + 1, dtype=dtype, device=device)
 
-        # 整个 image 的元素个数
-        Ni = 1
-        for s in size:
-            Ni *= s
+        ngtdm_idx_max = Ng * 3
 
-        # 起始 flat index（bb 的下界）
-        i = 0
+        i = 0  # flat index 起点
         for d in range(Nd):
             i += bb[d] * strides[d]
 
         cur_idx = [0] * Nd
-        ngtdm_idx_max = Ng * 3
 
-        while i < Ni:
+        while i < Ni_total:
             # 先在各维上把 i 调到 bounding box 内
             for d in range(Nd - 1, 0, -1):
                 cur_idx[d] = (i % strides[d - 1]) // strides[d]
@@ -1808,15 +2277,12 @@ def calculate_ngtdm_torch(
 
         return ngtdm
 
-    # ---- voxel-based / 非 voxel-based 两种模式 ----
-
+    # ================== 分支：非 voxel / voxel ==================
     if voxels is None or kernelRadius <= 0:
-        # 整块 ROI，一个 NGTDM
-        bb_lo = [0] * Nd
-        bb_hi = [s - 1 for s in size]
-        bb = bb_lo + bb_hi
-        result = _single_ngtdm(bb).unsqueeze(0)  # (1, Ng, 3)
+        # 整块 ROI，一个 NGTDM（优化后）
+        result = _single_ngtdm_vectorized().unsqueeze(0)  # (1, Ng, 3)
     else:
+        # voxel-based：逐 voxel 构造 bbox，使用原始 bbox 版本
         voxels = voxels.to(device=device, dtype=torch.long)
         if voxels.ndim != 2 or voxels.shape[1] != Nd:
             raise ValueError(f"voxels must have shape (Nvox, Nd={Nd}), got {tuple(voxels.shape)}")
@@ -1825,8 +2291,8 @@ def calculate_ngtdm_torch(
         result = torch.empty((Nvox, Ng, 3), dtype=dtype, device=device)
 
         for v in range(Nvox):
-            bb_lo: list[int] = []
-            bb_hi: list[int] = []
+            bb_lo: List[int] = []
+            bb_hi: List[int] = []
             for d in range(Nd):
                 center_d = int(voxels[v, d].item())
                 if force2D and d == force2Ddimension:
@@ -1837,6 +2303,6 @@ def calculate_ngtdm_torch(
                 bb_lo.append(lo)
                 bb_hi.append(hi)
             bb = bb_lo + bb_hi
-            result[v] = _single_ngtdm(bb)
+            result[v] = _single_ngtdm_bbox(bb)
 
     return result

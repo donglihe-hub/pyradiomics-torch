@@ -4,7 +4,7 @@ import torch
 
 from radiomics_torch import base
 
-from .cmatrices import calculate_glrlm_torch
+from .cmatrices import calculate_glrlm_torch, glrlm_vectorized_3d
 from .utils import torch_delete
 
 
